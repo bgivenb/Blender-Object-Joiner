@@ -22,8 +22,8 @@ A Blender add-on for turning multiple selected meshes into one continuous, contr
 
 ## Install
 
-1. Download `objectjoiner.py` and `object_joiner_core.py` into the same directory, then zip them together.
-2. In Blender 3.6 or newer, open **Edit → Preferences → Add-ons → Install** and select the zip.
+1. Run `python scripts/package_addon.py` from a source checkout to create the installable archive and its SHA-256 checksum in `dist/`.
+2. In Blender 3.6 or newer, open **Edit → Preferences → Add-ons → Install** and select `dist/object-joiner-v2.0.0.zip`.
 3. Enable **Object Joiner**.
 4. Open the 3D Viewport sidebar (`N`) and choose **Object Joiner**.
 
@@ -51,6 +51,12 @@ Rebuild the checked-in example image:
 
 ```bash
 blender --background --python scripts/render_example.py
+```
+
+Build and checksum the installable add-on archive with:
+
+```bash
+python scripts/package_addon.py
 ```
 
 ## Scope

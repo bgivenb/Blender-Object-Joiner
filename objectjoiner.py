@@ -12,7 +12,10 @@ import bpy
 from bpy.props import BoolProperty, FloatProperty, PointerProperty
 from bpy.types import Operator, Panel, PropertyGroup
 
-from object_joiner_core import summarize_meshes, validate_settings
+try:
+    from .object_joiner_core import summarize_meshes, validate_settings
+except ImportError:  # Support direct execution from a source checkout.
+    from object_joiner_core import summarize_meshes, validate_settings
 
 
 class ObjectJoinerProperties(PropertyGroup):

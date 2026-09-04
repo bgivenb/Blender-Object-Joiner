@@ -1,186 +1,201 @@
 bl_info = {
     "name": "Object Joiner",
     "author": "Given Borthwick",
-    "version": (1, 1),
+    "version": (2, 0, 0),
     "blender": (3, 6, 0),
-    "location": "View3D > Tool Shelf > Object Joiner",
-    "description": "Joins selected objects with customizable voxel size and target detail.",
-    "warning": "",
-    "wiki_url": "https://github.com/bgivenb/Blender-Object-Joiner",
+    "location": "View3D > Sidebar > Object Joiner",
+    "description": "Non-destructively join, remesh, and reduce selected meshes",
     "category": "Object",
 }
 
 import bpy
-from bpy.props import FloatProperty, PointerProperty, BoolProperty
+from bpy.props import BoolProperty, FloatProperty, PointerProperty
 from bpy.types import Operator, Panel, PropertyGroup
+
+from object_joiner_core import summarize_meshes, validate_settings
 
 
 class ObjectJoinerProperties(PropertyGroup):
     voxel_size: FloatProperty(
-        name="Voxel Size (m)",
-        description="Smaller values yield more detailed meshes (may increase computation time)",
-        default=0.01,
+        name="Voxel size (m)",
+        description="Smaller values preserve more detail but cost more memory and time",
+        default=0.05,
         min=0.0001,
         max=1.0,
     )
     target_detail: FloatProperty(
-        name="Target Detail",
-        description="Lower values result in fewer polygons (between 0 and 1)",
-        default=0.1,
+        name="Decimate ratio",
+        description="Approximate fraction of remeshed polygons to retain",
+        default=0.35,
         min=0.01,
         max=1.0,
     )
-    hide_original: BoolProperty(
-        name="Hide Original Objects",
-        description="Hide the original objects after joining",
-        default=True,
-    )
+    hide_originals: BoolProperty(name="Hide original objects", default=True)
+
+
+def _activate(context, obj):
+    bpy.ops.object.select_all(action="DESELECT")
+    obj.select_set(True)
+    context.view_layer.objects.active = obj
+
+
+def _apply_modifier(context, obj, modifier):
+    _activate(context, obj)
+    bpy.ops.object.modifier_apply(modifier=modifier.name)
 
 
 class OBJECT_OT_JoinObjects(Operator):
     bl_idname = "object.join_objects_custom"
-    bl_label = "Join Objects"
-    bl_description = "Joins selected objects with specified voxel size and target detail"
-    bl_options = {'REGISTER', 'UNDO'}
+    bl_label = "Build Joined Mesh"
+    bl_description = "Duplicate selected meshes, join and remesh the copies, then reduce the result"
+    bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
         props = context.scene.object_joiner_props
-        voxel_size = props.voxel_size
-        target_detail = props.target_detail
-        hide_original = props.hide_original
+        source_meshes = [obj for obj in context.selected_objects if obj.type == "MESH"]
+        try:
+            validate_settings(len(source_meshes), props.voxel_size, props.target_detail)
+            result, summary = self._build(context, source_meshes, props)
+        except Exception as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
 
-        # Duplicate selected objects and move to a new collection
-        selected_objs = context.selected_objects
-        if not selected_objs:
-            self.report({'ERROR'}, "No objects selected.")
-            return {'CANCELLED'}
+        self.report(
+            {"INFO"},
+            f"Created {result.name}: {summary.source_polygons:,} → "
+            f"{summary.result_polygons:,} polygons ({summary.change_percent:+.1f}% change)",
+        )
+        return {"FINISHED"}
 
-        new_collection = bpy.data.collections.new("ObjectJoiner_Collection")
-        context.scene.collection.children.link(new_collection)
+    def _build(self, context, source_meshes, props):
+        if bpy.ops.object.mode_set.poll():
+            bpy.ops.object.mode_set(mode="OBJECT")
 
-        duplicated_objs = []
-        for obj in selected_objs:
-            dup = obj.copy()
-            dup.data = obj.data.copy()
-            new_collection.objects.link(dup)
-            duplicated_objs.append(dup)
+        source_counts = [len(obj.data.polygons) for obj in source_meshes]
+        original_visibility = [(obj, obj.hide_viewport, obj.hide_render) for obj in source_meshes]
+        collection = bpy.data.collections.new("ObjectJoiner Result")
+        context.scene.collection.children.link(collection)
+        copies = []
 
-        # Hide original objects if the option is enabled
-        if hide_original:
-            for obj in selected_objs:
-                obj.hide_viewport = True
-                obj.hide_render = True
+        try:
+            for source in source_meshes:
+                duplicate = source.copy()
+                duplicate.data = source.data.copy()
+                collection.objects.link(duplicate)
+                copies.append(duplicate)
 
-        bpy.ops.object.select_all(action='DESELECT')
-        for obj in duplicated_objs:
-            obj.select_set(True)
-        context.view_layer.objects.active = duplicated_objs[0]
+            bpy.ops.object.select_all(action="DESELECT")
+            for duplicate in copies:
+                duplicate.select_set(True)
+            context.view_layer.objects.active = copies[0]
+            bpy.ops.object.join()
+            result = context.active_object
+            result.name = "object_joiner_result"
+            result["object_joiner_result"] = True
 
-        # Join duplicated objects
-        bpy.ops.object.join()
-        joined_obj = context.active_object
-        joined_obj.name = "objectjoiner_joined"
+            shell = result.copy()
+            shell.data = result.data.copy()
+            shell.name = "object_joiner_reference_shell"
+            collection.objects.link(shell)
 
-        # Duplicate joined object to create shell
-        shell_obj = joined_obj.copy()
-        shell_obj.data = joined_obj.data.copy()
-        shell_obj.name = "objectjoiner_shell"
-        new_collection.objects.link(shell_obj)
+            remesh = result.modifiers.new("Voxel Remesh", "REMESH")
+            remesh.mode = "VOXEL"
+            remesh.voxel_size = props.voxel_size
+            _apply_modifier(context, result, remesh)
 
-        # Apply Remesh Modifier (Voxel)
-        remesh_mod = joined_obj.modifiers.new(name="Remesh", type='REMESH')
-        remesh_mod.mode = 'VOXEL'
-        remesh_mod.voxel_size = voxel_size
-        remesh_mod.adaptivity = 0.001
-        bpy.context.view_layer.objects.active = joined_obj
-        bpy.ops.object.modifier_apply(modifier=remesh_mod.name)
+            shrinkwrap = result.modifiers.new("Restore Surface", "SHRINKWRAP")
+            shrinkwrap.wrap_method = "NEAREST_SURFACEPOINT"
+            shrinkwrap.wrap_mode = "ON_SURFACE"
+            shrinkwrap.target = shell
+            _apply_modifier(context, result, shrinkwrap)
 
-        # First Shrinkwrap Modifier
-        shrinkwrap1 = joined_obj.modifiers.new(name="Shrinkwrap1", type='SHRINKWRAP')
-        shrinkwrap1.wrap_method = 'NEAREST_SURFACEPOINT'
-        shrinkwrap1.wrap_mode = 'ON_SURFACE'
-        shrinkwrap1.target = shell_obj
-        bpy.ops.object.modifier_apply(modifier=shrinkwrap1.name)
+            if props.target_detail < 1:
+                decimate = result.modifiers.new("Reduce Geometry", "DECIMATE")
+                decimate.ratio = props.target_detail
+                _apply_modifier(context, result, decimate)
 
-        # Decimate Modifier
-        decimate = joined_obj.modifiers.new(name="Decimate", type='DECIMATE')
-        decimate.decimate_type = 'COLLAPSE'
-        decimate.ratio = target_detail
-        bpy.ops.object.modifier_apply(modifier=decimate.name)
+            final_shrinkwrap = result.modifiers.new("Restore Final Surface", "SHRINKWRAP")
+            final_shrinkwrap.wrap_method = "NEAREST_SURFACEPOINT"
+            final_shrinkwrap.wrap_mode = "ON_SURFACE"
+            final_shrinkwrap.target = shell
+            _apply_modifier(context, result, final_shrinkwrap)
 
-        # Second Shrinkwrap Modifier
-        shrinkwrap2 = joined_obj.modifiers.new(name="Shrinkwrap2", type='SHRINKWRAP')
-        shrinkwrap2.wrap_method = 'NEAREST_SURFACEPOINT'
-        shrinkwrap2.wrap_mode = 'ON_SURFACE'
-        shrinkwrap2.target = shell_obj
-        bpy.ops.object.modifier_apply(modifier=shrinkwrap2.name)
+            bpy.data.objects.remove(shell, do_unlink=True)
+            for polygon in result.data.polygons:
+                polygon.use_smooth = True
 
-        # Delete shell object
-        bpy.data.objects.remove(shell_obj, do_unlink=True)
+            if props.hide_originals:
+                for source in source_meshes:
+                    source["object_joiner_hidden_original"] = True
+                    source.hide_viewport = True
+                    source.hide_render = True
 
-        self.report({'INFO'}, "Objects joined successfully.")
-        return {'FINISHED'}
+            summary = summarize_meshes(source_counts, len(result.data.polygons))
+            result["source_object_count"] = summary.source_objects
+            result["source_polygon_count"] = summary.source_polygons
+            result["result_polygon_count"] = summary.result_polygons
+            _activate(context, result)
+            return result, summary
+        except Exception:
+            for source, viewport, render in original_visibility:
+                source.hide_viewport = viewport
+                source.hide_render = render
+            for obj in list(collection.objects):
+                bpy.data.objects.remove(obj, do_unlink=True)
+            bpy.data.collections.remove(collection)
+            raise
 
 
 class OBJECT_OT_UnhideOriginals(Operator):
-    bl_idname = "object.unhide_originals"
-    bl_label = "Unhide Original Objects"
-    bl_description = "Unhides the original objects that were hidden by Object Joiner"
-    bl_options = {'REGISTER', 'UNDO'}
+    bl_idname = "object.unhide_object_joiner_originals"
+    bl_label = "Unhide Originals"
+    bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
-        original_collection = bpy.data.collections.get("ObjectJoiner_Collection")
-        if not original_collection:
-            self.report({'WARNING'}, "No ObjectJoiner_Collection found.")
-            return {'CANCELLED'}
-
-        # Iterate through all objects in the original collection and unhide them
-        for obj in original_collection.objects:
+        originals = [obj for obj in bpy.data.objects if obj.get("object_joiner_hidden_original")]
+        for obj in originals:
             obj.hide_viewport = False
             obj.hide_render = False
-
-        self.report({'INFO'}, "Original objects have been unhidden.")
-        return {'FINISHED'}
+            del obj["object_joiner_hidden_original"]
+        self.report({"INFO"}, f"Unhid {len(originals)} original object(s)")
+        return {"FINISHED"}
 
 
 class OBJECTJOINER_PT_MainPanel(Panel):
     bl_label = "Object Joiner"
     bl_idname = "OBJECTJOINER_PT_main_panel"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = 'Object Joiner'
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Object Joiner"
 
     def draw(self, context):
         layout = self.layout
         props = context.scene.object_joiner_props
-
         layout.prop(props, "voxel_size")
         layout.prop(props, "target_detail")
-        layout.prop(props, "hide_original")
-        layout.operator("object.join_objects_custom", icon='AUTOMERGE_ON')
-        if props.hide_original:
-            layout.separator()
-            layout.operator("object.unhide_originals", text="Unhide Original Objects", icon='HIDE_OFF')
-        
-        # Branding
-        layout.separator()
-        layout.label(text="Created by Given Borthwick", icon='INFO')
+        layout.prop(props, "hide_originals")
+        layout.operator("object.join_objects_custom", icon="AUTOMERGE_ON")
+        layout.operator("object.unhide_object_joiner_originals", icon="HIDE_OFF")
+
+
+CLASSES = (
+    ObjectJoinerProperties,
+    OBJECT_OT_JoinObjects,
+    OBJECT_OT_UnhideOriginals,
+    OBJECTJOINER_PT_MainPanel,
+)
 
 
 def register():
-    bpy.utils.register_class(ObjectJoinerProperties)
-    bpy.utils.register_class(OBJECT_OT_JoinObjects)
-    bpy.utils.register_class(OBJECT_OT_UnhideOriginals)
-    bpy.utils.register_class(OBJECTJOINER_PT_MainPanel)
+    for cls in CLASSES:
+        bpy.utils.register_class(cls)
     bpy.types.Scene.object_joiner_props = PointerProperty(type=ObjectJoinerProperties)
 
 
 def unregister():
-    bpy.utils.unregister_class(ObjectJoinerProperties)
-    bpy.utils.unregister_class(OBJECT_OT_JoinObjects)
-    bpy.utils.unregister_class(OBJECT_OT_UnhideOriginals)
-    bpy.utils.unregister_class(OBJECTJOINER_PT_MainPanel)
     del bpy.types.Scene.object_joiner_props
+    for cls in reversed(CLASSES):
+        bpy.utils.unregister_class(cls)
 
 
 if __name__ == "__main__":

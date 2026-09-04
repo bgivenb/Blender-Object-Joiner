@@ -1,85 +1,62 @@
-Object Joiner 1.1
+# Object Joiner for Blender
 
-Overview
+[![Tests](https://github.com/bgivenb/Blender-Object-Joiner/actions/workflows/test.yml/badge.svg)](https://github.com/bgivenb/Blender-Object-Joiner/actions/workflows/test.yml)
 
-Object Joiner is a Blender addon designed to streamline the process of joining multiple objects into a single, optimized mesh. With customizable voxel size and target detail settings, you can control the level of detail and polygon count in the resulting mesh, making it ideal for both high-detail models and optimized, low-polygon versions.
+A Blender add-on for turning multiple selected meshes into one continuous, controllably decimated sculpting mesh while preserving the originals. It duplicates the inputs, voxel-remeshes the copies, shrinkwraps the result toward the source surface, decimates it, and runs a final shrinkwrap pass to restore surface detail.
 
-Created by Given Borthwick
-Features
+<a href="https://www.reddit.com/r/blender/comments/1gq8xs4/i_made_a_free_plugin_to_join_multiple_meshes/"><img src="docs/images/original-reddit-demo.gif" alt="Original Object Joiner sculpting workflow in Blender" width="720"></a>
 
-    Customizable Voxel Size: Control the detail of the voxel remeshing process. Smaller values yield more detailed meshes but may increase computation time.
-    Target Detail Control: Adjust the polygon count of the final mesh with a target detail parameter between 0 and 1.
-    Hide Original Objects: Option to hide original objects after joining to keep your workspace clean.
-    Easy Unhide Functionality: Quickly unhide original objects if needed.
-    Automated Workflow: Duplicates selected objects, joins them, applies modifiers, and cleans up automatically.
+*Excerpt from the original Blender walkthrough. [Watch the complete demo on r/blender](https://www.reddit.com/r/blender/comments/1gq8xs4/i_made_a_free_plugin_to_join_multiple_meshes/) or read the [design discussion](https://www.reddit.com/r/blender/comments/1gq8f3s/i_made_a_free_blender_addon_for_merging_meshes/).*
 
-Installation
+### Current reproducible example
 
-    Download the Addon:
-        Save the object_joiner.py script to a convenient location on your computer.
+![Two source meshes beside their joined result](docs/images/object-joiner-example.png)
 
-    Install via Blender:
-        Open Blender.
-        Navigate to Edit > Preferences.
-        Click on the Add-ons tab.
-        Click Install... at the top.
-        Locate and select the downloaded object_joiner.py file.
-        After installation, enable the addon by checking the box next to Object Joiner.
+## Design
 
-    Verify Installation:
-        In the 3D Viewport, press N to open the sidebar.
-        Navigate to the Object Joiner tab to access the addon’s interface.
+- **Non-destructive:** processing happens on copies in a dedicated result collection.
+- **Bounded controls:** voxel size and decimation ratio are validated before Blender begins expensive work.
+- **Measurable:** each result records the source object count and before/after polygon counts as custom properties; Blender also reports the percentage change.
+- **Recoverable:** hidden source objects are tagged and can be restored with **Unhide Originals**.
+- **Failure-aware:** partial results are removed and source visibility is restored if the operation fails.
 
-Usage
+## Install
 
-    Select Objects:
-        In the 3D Viewport, select the objects you wish to join.
+1. Download `objectjoiner.py` and `object_joiner_core.py` into the same directory, then zip them together.
+2. In Blender 3.6 or newer, open **Edit → Preferences → Add-ons → Install** and select the zip.
+3. Enable **Object Joiner**.
+4. Open the 3D Viewport sidebar (`N`) and choose **Object Joiner**.
 
-    Open Object Joiner Panel:
-        Press N to open the sidebar.
-        Click on the Object Joiner tab.
+## Use
 
-    Configure Settings:
-        Voxel Size (m): Set the desired voxel size. Smaller values create more detailed meshes but may increase computation time.
-        Target Detail: Set a value between 0.01 and 1. Lower values reduce the polygon count of the final mesh.
-        Hide Original Objects: Check this box if you want the original objects to be hidden after joining.
+Select at least two mesh objects, choose a voxel size and target decimation ratio, and click **Build Joined Mesh**. Smaller voxels preserve more detail but cost substantially more time and memory. Start with `0.05 m` and refine from there based on scene scale.
 
-    Join Objects:
-        Click the Join Objects button to execute the join operation.
+The originals remain intact. When **Hide original objects** is enabled, use **Unhide Originals** to restore their viewport and render visibility.
 
-    Unhide Original Objects (If Hidden):
-        If you chose to hide the original objects, a Unhide Original Objects button will appear below the Join Objects button.
-        Click Unhide Original Objects to restore the visibility of the original objects.
+## Development
 
-Additional Information
+Run the dependency-free tests:
 
-    Voxel Remeshing: Utilizes Blender’s Remesh modifier in voxel mode to create a unified mesh with controlled detail.
-    Shrinkwrap Modifiers: Applied to ensure the joined mesh conforms to the original shapes before decimation.
-    Decimation: Reduces the polygon count based on the target detail setting, optimizing the mesh for performance.
+```bash
+python -m unittest discover -s tests -v
+```
 
-Troubleshooting
+Verify add-on registration in Blender:
 
-    Original Objects Still Hidden:
-        Ensure that the Hide Original Objects option was enabled during the join operation.
-        Use the Unhide Original Objects button in the Object Joiner panel.
-        Alternatively, press Alt + H in the 3D Viewport to unhide all hidden objects.
+```bash
+blender --background --python-expr "import sys; sys.path.insert(0, '.'); import objectjoiner as addon; addon.register(); addon.unregister()"
+```
 
-    Addon Not Responding:
-        Make sure that objects are selected before clicking the Join Objects button.
-        Check Blender’s System Console for any error messages:
-            Go to Window > Toggle System Console to view Blender's console output.
+Rebuild the checked-in example image:
 
-    Performance Issues:
-        Be cautious with very small voxel sizes or very low target detail values, as they can significantly impact performance, especially with complex or numerous objects.
+```bash
+blender --background --python scripts/render_example.py
+```
 
-Contributing
+## Scope
 
-Contributions are welcome! If you encounter bugs or have suggestions for improvements, please open an issue or submit a pull request on the GitHub repository.
-License
+This is an independent hobby project. Always keep a saved copy of important Blender work before running geometry operations.
 
-This project is licensed under the CC0 License.
-Contact
+## License
 
-Created by Given Borthwick
-
-    Email: bgivenb@gmail.com
+[CC0 1.0 Universal](LICENSE)

@@ -4,6 +4,16 @@ from object_joiner_core import summarize_meshes, validate_settings
 
 
 class ObjectJoinerCoreTests(unittest.TestCase):
+    def test_join_only_does_not_validate_unused_remesh_controls(self):
+        validate_settings(2, 0, 0, "JOIN")
+        with self.assertRaises(ValueError):
+            validate_settings(2, 0.1, 0.5, "UNKNOWN")
+
+    def test_nonfinite_remesh_settings_are_rejected(self):
+        for value in (float("nan"), float("inf"), -float("inf")):
+            with self.assertRaises(ValueError):
+                validate_settings(2, value, 0.5)
+
     def test_valid_settings(self):
         validate_settings(2, 0.05, 0.35)
 

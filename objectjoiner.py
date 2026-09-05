@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Object Joiner",
     "author": "Given Borthwick",
-    "version": (2, 0, 0),
+    "version": (2, 1, 0),
     "blender": (3, 6, 0),
     "location": "View3D > Sidebar > Object Joiner",
     "description": "Non-destructively join, remesh, and reduce selected meshes",
@@ -9,7 +9,7 @@ bl_info = {
 }
 
 import bpy
-from bpy.props import BoolProperty, FloatProperty, PointerProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, PointerProperty
 from bpy.types import Operator, Panel, PropertyGroup
 
 try:
@@ -19,8 +19,24 @@ except ImportError:  # Support direct execution from a source checkout.
 
 
 class ObjectJoinerProperties(PropertyGroup):
+    mode: EnumProperty(
+        name="Mode",
+        default="REMESH",
+        items=(
+            (
+                "REMESH",
+                "Sculpting remesh",
+                "Fuse and reduce geometry; rebuilds topology",
+            ),
+            (
+                "JOIN",
+                "Join only",
+                "Combine evaluated meshes without remeshing; keep UVs and materials",
+            ),
+        ),
+    )
     voxel_size: FloatProperty(
-        name="Voxel size (m)",
+        name="Voxel size",
         description="Smaller values preserve more detail but cost more memory and time",
         default=0.05,
         min=0.0001,
@@ -50,14 +66,20 @@ def _apply_modifier(context, obj, modifier):
 class OBJECT_OT_JoinObjects(Operator):
     bl_idname = "object.join_objects_custom"
     bl_label = "Build Joined Mesh"
-    bl_description = "Duplicate selected meshes, join and remesh the copies, then reduce the result"
+    bl_description = (
+        "Duplicate selected meshes, join and remesh the copies, then reduce the result"
+    )
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
         props = context.scene.object_joiner_props
         source_meshes = [obj for obj in context.selected_objects if obj.type == "MESH"]
         try:
-            validate_settings(len(source_meshes), props.voxel_size, props.target_detail)
+            validate_settings(
+                len(source_meshes), props.voxel_size, props.target_detail, props.mode
+            )
+            if context.mode != "OBJECT":
+                raise ValueError("Switch to Object Mode before joining meshes.")
             result, summary = self._build(context, source_meshes, props)
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
@@ -71,19 +93,38 @@ class OBJECT_OT_JoinObjects(Operator):
         return {"FINISHED"}
 
     def _build(self, context, source_meshes, props):
-        if bpy.ops.object.mode_set.poll():
-            bpy.ops.object.mode_set(mode="OBJECT")
-
-        source_counts = [len(obj.data.polygons) for obj in source_meshes]
-        original_visibility = [(obj, obj.hide_viewport, obj.hide_render) for obj in source_meshes]
+        original_selection = list(context.selected_objects)
+        original_active = context.view_layer.objects.active
+        original_visibility = [
+            (
+                obj,
+                obj.hide_viewport,
+                obj.hide_render,
+                obj.hide_get(),
+                obj.get("object_joiner_hidden_original"),
+            )
+            for obj in source_meshes
+        ]
+        source_counts = []
         collection = bpy.data.collections.new("ObjectJoiner Result")
         context.scene.collection.children.link(collection)
         copies = []
+        created_meshes = []
 
         try:
             for source in source_meshes:
-                duplicate = source.copy()
-                duplicate.data = source.data.copy()
+                depsgraph = context.evaluated_depsgraph_get()
+                evaluated = source.evaluated_get(depsgraph)
+                mesh = bpy.data.meshes.new_from_object(
+                    evaluated, preserve_all_data_layers=True, depsgraph=depsgraph
+                )
+                created_meshes.append(mesh)
+                source_counts.append(len(mesh.polygons))
+                mesh.transform(evaluated.matrix_world)
+                if evaluated.matrix_world.determinant() < 0:
+                    mesh.flip_normals()
+                mesh.update()
+                duplicate = bpy.data.objects.new(f"{source.name}_joined_copy", mesh)
                 collection.objects.link(duplicate)
                 copies.append(duplicate)
 
@@ -96,69 +137,102 @@ class OBJECT_OT_JoinObjects(Operator):
             result.name = "object_joiner_result"
             result["object_joiner_result"] = True
 
-            shell = result.copy()
-            shell.data = result.data.copy()
-            shell.name = "object_joiner_reference_shell"
-            collection.objects.link(shell)
+            if props.mode == "REMESH":
+                shell = result.copy()
+                shell.data = result.data.copy()
+                created_meshes.append(shell.data)
+                shell.name = "object_joiner_reference_shell"
+                collection.objects.link(shell)
 
-            remesh = result.modifiers.new("Voxel Remesh", "REMESH")
-            remesh.mode = "VOXEL"
-            remesh.voxel_size = props.voxel_size
-            _apply_modifier(context, result, remesh)
+                remesh = result.modifiers.new("Voxel Remesh", "REMESH")
+                remesh.mode = "VOXEL"
+                remesh.voxel_size = props.voxel_size
+                _apply_modifier(context, result, remesh)
 
-            shrinkwrap = result.modifiers.new("Restore Surface", "SHRINKWRAP")
-            shrinkwrap.wrap_method = "NEAREST_SURFACEPOINT"
-            shrinkwrap.wrap_mode = "ON_SURFACE"
-            shrinkwrap.target = shell
-            _apply_modifier(context, result, shrinkwrap)
+                shrinkwrap = result.modifiers.new("Restore Surface", "SHRINKWRAP")
+                shrinkwrap.wrap_method = "NEAREST_SURFACEPOINT"
+                shrinkwrap.wrap_mode = "ON_SURFACE"
+                shrinkwrap.target = shell
+                _apply_modifier(context, result, shrinkwrap)
 
-            if props.target_detail < 1:
-                decimate = result.modifiers.new("Reduce Geometry", "DECIMATE")
-                decimate.ratio = props.target_detail
-                _apply_modifier(context, result, decimate)
+                if props.target_detail < 1:
+                    decimate = result.modifiers.new("Reduce Geometry", "DECIMATE")
+                    decimate.ratio = props.target_detail
+                    _apply_modifier(context, result, decimate)
 
-            final_shrinkwrap = result.modifiers.new("Restore Final Surface", "SHRINKWRAP")
-            final_shrinkwrap.wrap_method = "NEAREST_SURFACEPOINT"
-            final_shrinkwrap.wrap_mode = "ON_SURFACE"
-            final_shrinkwrap.target = shell
-            _apply_modifier(context, result, final_shrinkwrap)
-
-            bpy.data.objects.remove(shell, do_unlink=True)
-            for polygon in result.data.polygons:
-                polygon.use_smooth = True
+                final_shrinkwrap = result.modifiers.new(
+                    "Restore Final Surface", "SHRINKWRAP"
+                )
+                final_shrinkwrap.wrap_method = "NEAREST_SURFACEPOINT"
+                final_shrinkwrap.wrap_mode = "ON_SURFACE"
+                final_shrinkwrap.target = shell
+                _apply_modifier(context, result, final_shrinkwrap)
+                bpy.data.objects.remove(shell, do_unlink=True)
+                for polygon in result.data.polygons:
+                    polygon.use_smooth = True
 
             if props.hide_originals:
                 for source in source_meshes:
-                    source["object_joiner_hidden_original"] = True
-                    source.hide_viewport = True
+                    if "object_joiner_hidden_original" not in source:
+                        source["object_joiner_hidden_original"] = [
+                            int(source.hide_viewport),
+                            int(source.hide_render),
+                            int(source.hide_get()),
+                        ]
+                    source.hide_set(True)
                     source.hide_render = True
 
             summary = summarize_meshes(source_counts, len(result.data.polygons))
             result["source_object_count"] = summary.source_objects
             result["source_polygon_count"] = summary.source_polygons
             result["result_polygon_count"] = summary.result_polygons
+            result["joiner_mode"] = props.mode
             _activate(context, result)
             return result, summary
         except Exception:
-            for source, viewport, render in original_visibility:
+            for source, viewport, render, hidden, marker in original_visibility:
                 source.hide_viewport = viewport
                 source.hide_render = render
+                source.hide_set(hidden)
+                if marker is None:
+                    if "object_joiner_hidden_original" in source:
+                        del source["object_joiner_hidden_original"]
+                else:
+                    source["object_joiner_hidden_original"] = marker
             for obj in list(collection.objects):
                 bpy.data.objects.remove(obj, do_unlink=True)
             bpy.data.collections.remove(collection)
+            bpy.ops.object.select_all(action="DESELECT")
+            for obj in original_selection:
+                obj.select_set(True)
+            context.view_layer.objects.active = original_active
             raise
+        finally:
+            for mesh in created_meshes:
+                try:
+                    if mesh.users == 0:
+                        bpy.data.meshes.remove(mesh)
+                except ReferenceError:
+                    pass  # Blender may already have removed a joined datablock.
 
 
 class OBJECT_OT_UnhideOriginals(Operator):
     bl_idname = "object.unhide_object_joiner_originals"
-    bl_label = "Unhide Originals"
+    bl_label = "Restore Originals"
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
-        originals = [obj for obj in bpy.data.objects if obj.get("object_joiner_hidden_original")]
+        originals = [
+            obj
+            for obj in context.view_layer.objects
+            if "object_joiner_hidden_original" in obj
+        ]
         for obj in originals:
-            obj.hide_viewport = False
-            obj.hide_render = False
+            state = obj["object_joiner_hidden_original"]
+            if isinstance(state, (bool, int)):
+                state = (False, False, False)  # Legacy v2.0 visibility marker.
+            obj.hide_viewport, obj.hide_render = bool(state[0]), bool(state[1])
+            obj.hide_set(bool(state[2]))
             del obj["object_joiner_hidden_original"]
         self.report({"INFO"}, f"Unhid {len(originals)} original object(s)")
         return {"FINISHED"}
@@ -174,8 +248,11 @@ class OBJECTJOINER_PT_MainPanel(Panel):
     def draw(self, context):
         layout = self.layout
         props = context.scene.object_joiner_props
-        layout.prop(props, "voxel_size")
-        layout.prop(props, "target_detail")
+        layout.prop(props, "mode")
+        if props.mode == "REMESH":
+            layout.prop(props, "voxel_size")
+            layout.prop(props, "target_detail")
+        layout.label(text="Uses visible modifiers at the current frame")
         layout.prop(props, "hide_originals")
         layout.operator("object.join_objects_custom", icon="AUTOMERGE_ON")
         layout.operator("object.unhide_object_joiner_originals", icon="HIDE_OFF")
